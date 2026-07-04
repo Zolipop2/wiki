@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instant Quant Model with Breakdown (Pure JS)</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .container {
+            background-color: #1e1e1e;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        h1 { color: #ffffff; border-bottom: 2px solid #333; padding-bottom: 10px; margin-top: 0; }
+        .app-interface { margin-bottom: 20px; }
+        input {
+            padding: 10px;
+            background: #2d2d2d;
+            border: 1px solid #444;
+            color: white;
+            border-radius: 4px;
+            font-size: 16px;
+            text-transform: uppercase;
+        }
+        button {
+            padding: 10px 20px;
+            background: #2ecc71;
+            color: black;
+            font-weight: bold;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #27ae60; }
+        #output {
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            background: #000;
+            padding: 20px;
+            border-radius: 4px;
+            color: #2ecc71;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Quant Model (Pure JavaScript Engine)</h1>
+
+    <div class="app-interface">
+        <input type="text" id="ticker-input" value="AAPL">
+        <button onclick="calculateMetrics()">Analyze</button>
+    </div>
+
+    <div id="output">Enter a stock ticker and press Analyze. Execution is instant.</div>
+</div>
+
+<script>
+    // Helper math functions to match Python's NumPy features
+    const mean = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const std = arr => {
+        const m = mean(arr);
+        return Math.sqrt(arr.reduce((a, b) => a + Math.pow(b - m, 2), 0) / arr.length);
+    };
+    const clamp01 = x => Math.max(0, Math.min(1, x));
+    const tanh = x => Math.tanh(x);
+
+    // Native JS calculation of RSI matching the math from your script
+    function calculateRSI(closePrices, period = 14) {
+        let rsiArray = new Array(closePrices.length).fill(50);
+        if (closePrices.length <= period) return rsiArray;
+
+        let deltas = [];
+        for (let i = 1; i < closePrices.length; i++) {
+            deltas.push(closePrices[i] - closePrices[i - 1]);
+        }
+
+        let gains = deltas.map(d => d > 0 ? d : 0);
+        let losses = deltas.map(d => d < 0 ? -d : 0);
+
+        for (let i = period; i < closePrices.length; i++) {
+            let windowGains = gains.slice(i - period, i);
+            let windowLosses = losses.slice(i - period, i);
+            let avgGain = mean(windowGains);
+            let avgLoss = mean(windowLosses);
+
+            let rs = avgGain / (avgLoss + 1e-9);
+            rsiArray[i] = 100 - (100 / (1 + rs));
+        }
+        return rsiArray;
+    }
+
+    async function calculateMetrics() {
+        const ticker = document.getElementById('ticker-input').value.toUpperCase();
+        const outputDiv = document.getElementById('output');
+        outputDiv.innerText = `Fetching financial data for ${ticker}...`;
+
+        try {
+            const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=2y&interval=1d`;
+            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+
+            const response = await fetch(proxyUrl);
+            if (!response.ok) throw new Error("Proxy connection failed.");
+
+            const containerData = await response.json();
+            if (!containerData.contents) throw new Error("Empty proxy response.");
+
+            const res = JSON.parse(containerData.contents);
+            if (!res.chart || !res.chart.result) throw new Error(`Invalid ticker symbol '${ticker}'`);
+
+            let closes = res.chart.result[0].indicators.quote[0].close;
+            closes = closes.filter(val => val !== null && val !== undefined);
+
+            if (closes.length < 50) throw new Error("Not enough data to parse moving averages.");
+
+            const currentPrice = closes[closes.length - 1];
+
+            // 1. Trend Strength (20 vs 50 Moving Average)
+            const ma20 = mean(closes.slice(-20));
+            const ma50 = mean(closes.slice(-50));
+            const tStrength = clamp01(0.5 + 0.5 * tanh((ma20 - ma50) / (currentPrice * 0.05)));
+
+            // 2. Momentum Pressure
+            const r1 = (currentPrice - closes[closes.length - 2]) / closes[closes.length - 2];
+            const r5 = (currentPrice - closes[closes.length - 6]) / closes[closes.length - 6];
+            const mPressure = clamp01(0.5 + 0.5 * tanh((r1 * 0.6 + r5 * 0.4) * 10));
+
+            // 3. RSI Pressure
+            const rsiValues = calculateRSI(closes, 14);
+            const currentRSI = rsiValues[rsiValues.length - 1];
+            const rPressure = clamp01(1 - (currentRSI / 100));
+
+            // 4. Breakout Position (20-day high/low)
+            const window20 = closes.slice(-20);
+            const high20 = Math.max(...window20);
+            const low20 = Math.min(...window20);
+            const bPosition = clamp01((currentPrice - low20) / (high20 - low20 + 1e-9));
+
+            // 5. Equilibrium Deviation (10-day base tracker)
+            const mid10 = mean(closes.slice(-10));
+            const eDeviation = clamp01(0.5 + 0.5 * tanh(((currentPrice - mid10) / mid10) * 8));
+
+            // 6. Volatility Regime
+            let returns = [];
+            for (let i = 1; i < closes.length; i++) {
+                returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+            }
+            const vRegime = clamp01(tanh(std(returns.slice(-20)) * 30));
+
+            // Combined metrics
+            const finalScore = mean([tStrength, mPressure, rPressure, bPosition, eDeviation, vRegime]);
+
+            // --- BUILD THE OUTPUT STRING ---
+            let output = `Results for ${ticker}:\n`;
+            output += `trend_strength: ${tStrength.toFixed(2)}\n`;
+            output += `momentum_pressure: ${mPressure.toFixed(2)}\n`;
+            output += `rsi_pressure: ${rPressure.toFixed(2)}\n`;
+            output += `breakout_position: ${bPosition.toFixed(2)}\n`;
+            output += `equilibrium_deviation: ${eDeviation.toFixed(2)}\n`;
+            output += `volatility_regime: ${vRegime.toFixed(2)}\n\n`;
+            output += `FINAL SCORE: ${finalScore.toFixed(2)}\n\n`;
+
+            output += `--- MARKET ANALYSIS ---\n`;
+            const state = finalScore > 0.65 ? "BULLISH BIAS" : (finalScore < 0.40 ? "BEARISH PRESSURE" : "SIDEWAYS / UNCERTAIN");
+            output += `State: ${state}\n`;
+            output += `Score: ${finalScore.toFixed(2)}\n\n`;
+
+            output += `--- STRUCTURE ---\n`;
+            if (tStrength > 0.7) output += `• Trend is strong → clear directional market\n`;
+            else if (tStrength < 0.4) output += `• Trend is weak → no strong direction\n`;
+            else output += `• Trend is mixed → consolidation likely\n`;
+
+            if (mPressure > 0.75) output += `• Momentum is strong → move accelerating\n`;
+            else if (mPressure < 0.35) output += `• Momentum is weak → no follow-through\n`;
+
+            if (rPressure > 0.75) output += `• RSI suggests downside is stretched → possible exhaustion\n`;
+            else if (rPressure < 0.35) output += `• RSI suggests upside is stretched → pullback risk\n`;
+
+            if (bPosition > 0.85) output += `• Near range highs → breakout or rejection risk\n`;
+            else if (bPosition < 0.2) output += `• Near range lows → potential reversal zone\n`;
+
+            if (Math.abs(eDeviation - 0.5) < 0.1) output += `• Near equilibrium → balanced market\n`;
+            else if (eDeviation > 0.7) output += `• Above equilibrium → stretched upward\n`;
+            else if (eDeviation < 0.3) output += `• Below equilibrium → stretched downward\n`;
+
+            if (vRegime > 0.75) output += `• High volatility → unstable / fast moves possible\n`;
+            else if (vRegime < 0.3) output += `• Low volatility → slow / ranging market\n`;
+
+            output += `\n--- TRADE DECISION ---\n`;
+            const bullishPressure = (tStrength + mPressure + (1 - rPressure) + bPosition + eDeviation) / 5;
+            const edge = bullishPressure - (vRegime * 0.5);
+            const confidence = Math.abs(edge - 0.5) * 2;
+
+            output += `Bullish pressure: ${bullishPressure.toFixed(2)}\n`;
+            output += `Risk level: ${vRegime.toFixed(2)}\n`;
+            output += `Edge score: ${edge.toFixed(2)}\n`;
+            output += `Confidence: ${confidence.toFixed(2)}\n`;
+
+            if (edge > 0.65 && confidence > 0.5) {
+                output += `\n✅ BUY BIAS\nSlight upward edge detected, but not guaranteed.`;
+            } else if (edge < 0.35 && confidence > 0.5) {
+                output += `\n❌ AVOID / BEARISH BIAS\nConditions lean negative or weak.`;
+            } else {
+                output += `\n⚠️ NO CLEAR EDGE\nMarket is mixed — better to wait.`;
+            }
+
+            outputDiv.innerText = output;
+
+        } catch (err) {
+            outputDiv.innerText = `Execution Error: ${err.message}`;
+        }
+    }
+</script>
+
+</body>
+</html>
+
